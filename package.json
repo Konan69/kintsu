@@ -1,0 +1,43 @@
+{
+  "name": "kintsu",
+  "private": true,
+  "workspaces": {
+    "packages": [
+      "apps/*",
+      "packages/*"
+    ],
+    "catalog": {
+      "dotenv": "^17.2.2",
+      "zod": "^4.1.13",
+      "typescript": "^5",
+      "convex": "^1.31.2",
+      "alchemy": "^0.82.1"
+    }
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --filter '*' dev",
+    "build": "bun run --filter '*' build",
+    "check-types": "bun run --filter '*' check-types",
+    "dev:native": "bun run --filter native dev",
+    "dev:web": "bun run --filter web dev",
+    "dev:server": "bun run --filter @kintsu/backend dev",
+    "dev:setup": "bun run --filter @kintsu/backend dev:setup",
+    "deploy": "bun run --filter @kintsu/infra deploy",
+    "destroy": "bun run --filter @kintsu/infra destroy",
+    "check": "oxlint && oxfmt --write"
+  },
+  "dependencies": {
+    "@kintsu/env": "workspace:*",
+    "dotenv": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251213.0",
+    "@kintsu/config": "workspace:*",
+    "oxfmt": "^0.26.0",
+    "oxlint": "^1.41.0",
+    "typescript": "catalog:"
+  },
+  "packageManager": "bun@1.3.5"
+}
