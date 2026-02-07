@@ -355,12 +355,13 @@ export const extractAndStoreMemories = internalAction({
           try {
             const embedding = await generateEmbedding(memory.content);
 
+            // Over-fetch to compensate for post-filtering invalidated results
             const searchResults = await ctx.vectorSearch(
               "memories",
               "by_embedding",
               {
                 vector: embedding,
-                limit: 5,
+                limit: 10,
                 filter: (q) => q.eq("userId", args.userId),
               }
             );
@@ -463,7 +464,12 @@ export const extractAndStoreMemories = internalAction({
     // Step 7: Execute decisions (with hash dedup + audit logging)
     for (const decision of decisions) {
       const entry = memoriesWithContext[decision.new_memory_index];
-      if (!entry) continue;
+      if (!entry) {
+        console.warn(
+          `LLM returned invalid decision index ${decision.new_memory_index} (only ${memoriesWithContext.length} memories). Skipping.`
+        );
+        continue;
+      }
 
       try {
         switch (decision.action) {
@@ -663,9 +669,10 @@ export const search = action({
   handler: async (ctx, args): Promise<Array<Record<string, unknown>>> => {
     const limit = args.limit ?? 10;
 
+    // Over-fetch to compensate for post-filtering invalidated results
     const results = await ctx.vectorSearch("memories", "by_embedding", {
       vector: args.embedding,
-      limit,
+      limit: limit * 2,
       filter: (q) => q.eq("userId", args.userId),
     });
 
@@ -704,7 +711,7 @@ export const addFromTool = action({
     | { success: true; memoryId: string }
     | { success: false; reason: string; existingMemoryId?: string }
   > => {
-    // Hash dedup check
+    // Hash dedup check (best-effort — not atomic with insert)
     const contentHash = await computeContentHash(args.content);
     const existing = await ctx.runQuery(internal.memories.checkContentHash, {
       userId: args.userId,
@@ -719,7 +726,14 @@ export const addFromTool = action({
     }
 
     // Generate embedding and insert
-    const embedding = await generateEmbedding(args.content);
+    let embedding: number[];
+    try {
+      embedding = await generateEmbedding(args.content);
+    } catch (error) {
+      console.error("addFromTool: embedding generation failed:", error);
+      return { success: false, reason: "embedding_failed" };
+    }
+
     const memoryId = await ctx.runMutation(internal.memories.addInternal, {
       userId: args.userId,
       content: args.content,
@@ -841,6 +855,13 @@ export const updateCoreMemoryInternal = internalMutation({
 
     if (existing) {
       await ctx.db.patch(existing._id, {
+        content: args.content,
+        updatedAt: Date.now(),
+      });
+    } else {
+      await ctx.db.insert("coreMemoryBlocks", {
+        userId: args.userId,
+        label: args.label,
         content: args.content,
         updatedAt: Date.now(),
       });

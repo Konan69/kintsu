@@ -4,6 +4,7 @@ import type { UIMessage } from "ai";
 import { openai } from "@ai-sdk/openai";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "@kintsu/backend/convex/_generated/api";
+import type { Id } from "@kintsu/backend/convex/_generated/dataModel";
 
 // Initialize clients
 const convexUrl = process.env.VITE_CONVEX_URL || process.env.CONVEX_URL || "";
@@ -183,7 +184,7 @@ export const kintsuTools = {
         }
 
         const result = await convex.action(api.memories.addFromTool, {
-          userId: userId as any,
+          userId: userId as Id<"users">,
           content,
           type,
           keywords,
@@ -244,7 +245,7 @@ export const kintsuTools = {
 
         // Search memories
         const memories = await convex.action(api.memories.search, {
-          userId: userId as any, // Cast to Id type
+          userId: userId as Id<"users">,
           embedding,
           limit: 5,
         });
