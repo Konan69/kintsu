@@ -121,8 +121,11 @@ type MemoryDecision = z.infer<typeof decisionSchema>["decisions"][number];
 
 async function generateEmbedding(text: string): Promise<number[]> {
   const { embedding } = await embed({
-    model: openai.embedding("text-embedding-3-small", { dimensions: 1536 }),
+    model: openai.embedding("text-embedding-3-small"),
     value: text,
+    providerOptions: {
+      openai: { dimensions: 1536 },
+    },
   });
   return embedding;
 }
