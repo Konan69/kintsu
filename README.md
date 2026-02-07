@@ -1,72 +1,101 @@
-# kintsu
+# Kintsu
 
-This project was created with [Better-T-Stack](https://github.com/AmanVarshney01/create-better-t-stack), a modern TypeScript stack that combines React, TanStack Start, Convex, and more.
+An AI companion that helps you understand your attachment patterns and communicate better in relationships. Built on attachment theory — the science of how we connect.
 
-## Features
+The name comes from **kintsugi**, the Japanese art of repairing broken pottery with gold. The idea: relationships aren't weakened by their cracks — they're made more beautiful when you understand and mend them.
 
-- **TypeScript** - For type safety and improved developer experience
-- **TanStack Start** - SSR framework with TanStack Router
-- **TailwindCSS** - Utility-first CSS for rapid UI development
-- **shadcn/ui** - Reusable UI components
-- **Convex** - Reactive backend-as-a-service platform
-- **Oxlint** - Oxlint + Oxfmt (linting & formatting)
+## What it does
 
-## Getting Started
+- **Attachment style awareness** — identifies whether you lean anxious or avoidant and tailors guidance accordingly
+- **Knowledge-grounded conversations** — responses are backed by RAG over attachment theory literature, not generic advice
+- **Persistent memory** — remembers your relationship context, partner dynamics, and past conversations across sessions
+- **Memory processing pipeline** — extracts and links episodic, semantic, and procedural memories with temporal validity
+- **Concept network** — maps attachment theory concepts (triggers, behaviors, strategies) and their relationships
 
-First, install the dependencies:
+## Tech stack
 
-```bash
-bun install
-```
+| Layer | Tech |
+|-------|------|
+| Frontend | React 19, TanStack Start (SSR), TanStack Router |
+| Styling | Tailwind CSS v4, shadcn/ui |
+| AI | Vercel AI SDK, OpenRouter (Kimi-2.5), OpenAI embeddings |
+| Backend | Convex (reactive database, vector search, scheduled functions) |
+| Infra | Cloudflare Workers via Alchemy |
+| Monorepo | Bun workspaces |
 
-## Convex Setup
-
-This project uses Convex as a backend. You'll need to set up Convex before running the app:
-
-```bash
-bun run dev:setup
-```
-
-Follow the prompts to create a new Convex project and connect it to your application.
-
-Copy environment variables from `packages/backend/.env.local` to `apps/*/.env`.
-
-Then, run the development server:
-
-```bash
-bun run dev
-```
-
-Open [http://localhost:3001](http://localhost:3001) in your browser to see the web application.
-Your app will connect to the Convex cloud backend automatically.
-
-## Deployment (Cloudflare via Alchemy)
-
-- Dev: cd apps/web && bun run alchemy dev
-- Deploy: cd apps/web && bun run deploy
-- Destroy: cd apps/web && bun run destroy
-
-For more details, see the guide on [Deploying to Cloudflare with Alchemy](https://www.better-t-stack.dev/docs/guides/cloudflare-alchemy).
-
-## Git Hooks and Formatting
-
-- Format and lint fix: `bun run check`
-
-## Project Structure
+## Project structure
 
 ```
 kintsu/
-├── apps/
-│   ├── web/         # Frontend application (React + TanStack Start)
-├── packages/
-│   ├── backend/     # Convex backend functions and schema
+├── apps/web/                  # React frontend
+│   ├── src/components/chat/   # Chat interface
+│   ├── src/components/ui/     # Component library
+│   ├── src/lib/agents/        # AI agent definition & tools
+│   ├── src/routes/            # Pages + API routes
+│   └── src/routes/api/        # Chat streaming & transcription endpoints
+├── packages/backend/          # Convex backend
+│   └── convex/                # Schema, queries, mutations, actions
+├── packages/infra/            # Cloudflare deployment config
+└── scripts/                   # Book ingestion pipeline
 ```
 
-## Available Scripts
+## Getting started
 
-- `bun run dev`: Start all applications in development mode
-- `bun run build`: Build all applications
-- `bun run dev:web`: Start only the web application
-- `bun run dev:setup`: Setup and configure your Convex project
-- `bun run check-types`: Check TypeScript types across all apps
-- `bun run check`: Run Oxlint and Oxfmt
+```bash
+# Install dependencies
+bun install
+
+# Set up Convex backend
+bun run dev:setup
+
+# Copy env vars from packages/backend/.env.local to apps/web/.env
+# You'll need: CONVEX_URL, OPENROUTER_API_KEY, OPENAI_API_KEY
+
+# Start everything
+bun run dev
+```
+
+Open [http://localhost:3001](http://localhost:3001).
+
+### Ingest knowledge base
+
+```bash
+# Place your source text in books/attached_content.txt
+bun run ingest:book
+```
+
+This chunks the text, generates embeddings via OpenAI, and stores them in Convex for vector search.
+
+## How the AI works
+
+The Kintsu agent has two tools:
+
+1. **queryKnowledge** — vector search over attachment theory book chunks and concept graphs
+2. **recallMemory** — vector search over user-specific memories from past conversations
+
+Core memory blocks (user profile, partner info, relationship context, preferences) are always injected into context. Long-term memories are retrieved dynamically based on relevance.
+
+A background memory processing pipeline extracts insights from conversations, deduplicates them, and builds a concept network linking attachment theory ideas.
+
+## Scripts
+
+| Command | Description |
+|---------|-------------|
+| `bun run dev` | Start all services |
+| `bun run dev:web` | Frontend only |
+| `bun run dev:server` | Backend only |
+| `bun run check` | Lint + format (oxlint/oxfmt) |
+| `bun run ingest:book` | Ingest knowledge base |
+
+## Deployment
+
+```bash
+cd apps/web
+bun run alchemy dev     # Local preview
+bun run deploy          # Deploy to Cloudflare
+bun run destroy         # Tear down
+```
+
+## License
+
+MIT
