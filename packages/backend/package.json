@@ -9,6 +9,10 @@
     "dev:setup": "convex dev --configure --until-success"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.25",
+    "@convex-dev/rag": "^0.7.0",
+    "@openrouter/ai-sdk-provider": "^2.1.1",
+    "ai": "^6.0.68",
     "convex": "catalog:",
     "dotenv": "catalog:",
     "zod": "catalog:"

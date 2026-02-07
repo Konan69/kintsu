@@ -25,7 +25,8 @@
     "dev:setup": "bun run --filter @kintsu/backend dev:setup",
     "deploy": "bun run --filter @kintsu/infra deploy",
     "destroy": "bun run --filter @kintsu/infra destroy",
-    "check": "oxlint && oxfmt --write"
+    "check": "oxlint && oxfmt --write",
+    "ingest:book": "bun run scripts/ingest-book.ts"
   },
   "dependencies": {
     "@kintsu/env": "workspace:*",
@@ -35,6 +36,8 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20251213.0",
     "@kintsu/config": "workspace:*",
+    "convex": "^1.31.7",
+    "openai": "^6.18.0",
     "oxfmt": "^0.26.0",
     "oxlint": "^1.41.0",
     "typescript": "catalog:"
