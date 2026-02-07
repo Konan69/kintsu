@@ -14,7 +14,7 @@ export const Route = createFileRoute("/api/chat")({
         const { messages }: { messages: UIMessage[] } = await request.json();
 
         const result = streamText({
-          model: openrouter.chat("moonshotai/kimi-k2.5"),
+          model: openrouter.chat("google/gemini-2.5-flash"),
           system: systemPrompt,
           messages: await convertToModelMessages(messages),
           tools: kintsuTools,

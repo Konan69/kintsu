@@ -66,6 +66,15 @@ const decisionSchema = z.object({
   ),
 });
 
+// Re-declare computeContentHash (mirrors memories.ts)
+async function computeContentHash(content: string): Promise<string> {
+  const data = new TextEncoder().encode(content.trim().toLowerCase());
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 type ExtractedMemory = z.infer<typeof extractionSchema>["memories"][number];
 type MemoryDecision = z.infer<typeof decisionSchema>["decisions"][number];
 
@@ -391,6 +400,22 @@ describe("decisionSchema", () => {
         {
           new_memory_index: 0,
           action: "DELETE", // not a valid action
+          reason: "test",
+        },
+      ],
+    };
+
+    const result = decisionSchema.safeParse(invalid);
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects HASH_DUPLICATE as a decision action (not an LLM action)", () => {
+    // HASH_DUPLICATE is an audit-only action, not produced by the LLM
+    const invalid = {
+      decisions: [
+        {
+          new_memory_index: 0,
+          action: "HASH_DUPLICATE",
           reason: "test",
         },
       ],
@@ -1262,5 +1287,101 @@ describe("Similar memory deduplication (existingByID)", () => {
 
     // Last write wins: 0.88 from the second pass
     expect(existingByID["Y"].similarity).toBe(0.88);
+  });
+});
+
+// ============================================
+// 9. Content Hash Normalization Tests
+// ============================================
+
+describe("computeContentHash", () => {
+  it("produces consistent hashes for the same content", async () => {
+    const hash1 = await computeContentHash("User has anxious attachment style");
+    const hash2 = await computeContentHash("User has anxious attachment style");
+    expect(hash1).toBe(hash2);
+  });
+
+  it("normalizes whitespace (trim)", async () => {
+    const hash1 = await computeContentHash("User has anxious attachment style");
+    const hash2 = await computeContentHash("  User has anxious attachment style  ");
+    expect(hash1).toBe(hash2);
+  });
+
+  it("normalizes case (toLowerCase)", async () => {
+    const hash1 = await computeContentHash("User has anxious attachment style");
+    const hash2 = await computeContentHash("USER HAS ANXIOUS ATTACHMENT STYLE");
+    expect(hash1).toBe(hash2);
+  });
+
+  it("normalizes both trim and case together", async () => {
+    const hash1 = await computeContentHash("hello world");
+    const hash2 = await computeContentHash("  HELLO WORLD  ");
+    expect(hash1).toBe(hash2);
+  });
+
+  it("produces different hashes for different content", async () => {
+    const hash1 = await computeContentHash("User has anxious attachment style");
+    const hash2 = await computeContentHash("User has avoidant attachment style");
+    expect(hash1).not.toBe(hash2);
+  });
+
+  it("produces a 64-character hex string (SHA-256)", async () => {
+    const hash = await computeContentHash("test");
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// ============================================
+// 10. Conversation Length Guard Tests
+// ============================================
+
+describe("Conversation length guard", () => {
+  it("takes last 20 messages when conversation exceeds MAX_MESSAGES", () => {
+    const MAX_MESSAGES = 20;
+    const messages = Array.from({ length: 50 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `Message ${i}`,
+    }));
+
+    const messagesToProcess =
+      messages.length > MAX_MESSAGES
+        ? messages.slice(-MAX_MESSAGES)
+        : messages;
+
+    expect(messagesToProcess).toHaveLength(20);
+    expect(messagesToProcess[0].content).toBe("Message 30");
+    expect(messagesToProcess[19].content).toBe("Message 49");
+  });
+
+  it("keeps all messages when conversation is under MAX_MESSAGES", () => {
+    const MAX_MESSAGES = 20;
+    const messages = Array.from({ length: 10 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `Message ${i}`,
+    }));
+
+    const messagesToProcess =
+      messages.length > MAX_MESSAGES
+        ? messages.slice(-MAX_MESSAGES)
+        : messages;
+
+    expect(messagesToProcess).toHaveLength(10);
+    expect(messagesToProcess[0].content).toBe("Message 0");
+  });
+
+  it("handles exactly MAX_MESSAGES messages (boundary case)", () => {
+    const MAX_MESSAGES = 20;
+    const messages = Array.from({ length: 20 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `Message ${i}`,
+    }));
+
+    const messagesToProcess =
+      messages.length > MAX_MESSAGES
+        ? messages.slice(-MAX_MESSAGES)
+        : messages;
+
+    expect(messagesToProcess).toHaveLength(20);
+    expect(messagesToProcess[0].content).toBe("Message 0");
   });
 });

@@ -130,6 +130,14 @@ async function generateEmbedding(text: string): Promise<number[]> {
   return embedding;
 }
 
+async function computeContentHash(content: string): Promise<string> {
+  const data = new TextEncoder().encode(content.trim().toLowerCase());
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 // Queue a conversation for memory processing (sleep-time compute)
 export const queueForProcessing = internalMutation({
   args: {
@@ -276,8 +284,15 @@ export const extractAndStoreMemories = internalAction({
       )
       .join("\n");
 
-    // Step 2: Format conversation
-    const conversationText = args.messages
+    // Step 2: Format conversation (with length guard)
+    const MAX_MESSAGES = 20;
+    const messagesToProcess =
+      args.messages.length > MAX_MESSAGES
+        ? args.messages.slice(-MAX_MESSAGES)
+        : args.messages;
+    // TODO: Replace with processed-message tracking (only extract unprocessed messages)
+
+    const conversationText = messagesToProcess
       .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
       .join("\n\n");
 
@@ -287,7 +302,7 @@ export const extractAndStoreMemories = internalAction({
     let extraction: z.infer<typeof extractionSchema>;
     try {
       const { object } = await generateObject({
-        model: openrouter.chat("moonshotai/kimi-k2.5"),
+        model: openrouter.chat("google/gemini-2.5-flash"),
         schema: extractionSchema,
         system: EXTRACTION_SYSTEM_PROMPT,
         prompt: extractionPrompt,
@@ -333,60 +348,58 @@ export const extractAndStoreMemories = internalAction({
       return;
     }
 
-    // Step 5: For each extracted memory, generate embedding and find similar existing ones
-    const memoriesWithContext: Array<{
-      memory: ExtractedMemory;
-      embedding: number[];
-      similar: Array<{
-        _id: string;
-        content: string;
-        type: string;
-        score: number;
-      }>;
-    }> = [];
+    // Step 5: For each extracted memory, generate embedding and find similar existing ones (parallel)
+    const memoriesWithContext = (
+      await Promise.all(
+        extraction.memories.map(async (memory) => {
+          try {
+            const embedding = await generateEmbedding(memory.content);
 
-    for (const memory of extraction.memories) {
-      try {
-        const embedding = await generateEmbedding(memory.content);
+            // Over-fetch to compensate for post-filtering invalidated results
+            const searchResults = await ctx.vectorSearch(
+              "memories",
+              "by_embedding",
+              {
+                vector: embedding,
+                limit: 10,
+                filter: (q) => q.eq("userId", args.userId),
+              }
+            );
 
-        const searchResults = await ctx.vectorSearch(
-          "memories",
-          "by_embedding",
-          {
-            vector: embedding,
-            limit: 5,
-            filter: (q) => q.eq("userId", args.userId),
+            // Post-filter invalidated memories (Convex vector filters don't support AND)
+            const similar: Array<{
+              _id: string;
+              content: string;
+              type: string;
+              score: number;
+            }> = [];
+            for (const result of searchResults) {
+              const full = await ctx.runQuery(internal.memories.getById, {
+                memoryId: result._id,
+              });
+              if (full && !full.invalidAt) {
+                similar.push({
+                  _id: full._id,
+                  content: full.content,
+                  type: full.type,
+                  score: result._score,
+                });
+              }
+            }
+
+            return { memory, embedding, similar };
+          } catch (error) {
+            console.error(
+              `Failed to process memory "${memory.content}":`,
+              error
+            );
+            return null;
           }
-        );
-
-        const similar: Array<{
-          _id: string;
-          content: string;
-          type: string;
-          score: number;
-        }> = [];
-        for (const result of searchResults) {
-          const full = await ctx.runQuery(internal.memories.getById, {
-            memoryId: result._id,
-          });
-          if (full && !full.invalidAt) {
-            similar.push({
-              _id: full._id,
-              content: full.content,
-              type: full.type,
-              score: result._score,
-            });
-          }
-        }
-
-        memoriesWithContext.push({ memory, embedding, similar });
-      } catch (error) {
-        console.error(
-          `Failed to process memory "${memory.content}":`,
-          error
-        );
-      }
-    }
+        })
+      )
+    ).filter(
+      (m): m is NonNullable<typeof m> => m !== null
+    );
 
     if (memoriesWithContext.length === 0) return;
 
@@ -430,7 +443,7 @@ export const extractAndStoreMemories = internalAction({
 
       try {
         const { object } = await generateObject({
-          model: openrouter.chat("moonshotai/kimi-k2.5"),
+          model: openrouter.chat("google/gemini-2.5-flash"),
           schema: decisionSchema,
           system: DECISION_SYSTEM_PROMPT,
           prompt: decisionPrompt,
@@ -448,47 +461,116 @@ export const extractAndStoreMemories = internalAction({
       }
     }
 
-    // Step 7: Execute decisions
+    // Step 7: Execute decisions (with hash dedup + audit logging)
     for (const decision of decisions) {
       const entry = memoriesWithContext[decision.new_memory_index];
-      if (!entry) continue;
+      if (!entry) {
+        console.warn(
+          `LLM returned invalid decision index ${decision.new_memory_index} (only ${memoriesWithContext.length} memories). Skipping.`
+        );
+        continue;
+      }
 
       try {
         switch (decision.action) {
           case "ADD": {
             const content = decision.content || entry.memory.content;
+
+            // Hash dedup check
+            const contentHash = await computeContentHash(content);
+            const existing = await ctx.runQuery(
+              internal.memories.checkContentHash,
+              { userId: args.userId, contentHash }
+            );
+            if (existing) {
+              await ctx.runMutation(internal.memories.logAudit, {
+                userId: args.userId,
+                conversationId: args.conversationId,
+                action: "HASH_DUPLICATE",
+                reason: `Content hash matches existing memory ${existing._id}`,
+                memoryContent: content,
+                targetMemoryId: existing._id,
+              });
+              break;
+            }
+
             // Re-embed only if the LLM rewrote the content
             const embedding =
               content !== entry.memory.content
                 ? await generateEmbedding(content)
                 : entry.embedding;
 
-            await ctx.runMutation(internal.memories.addInternal, {
+            const memoryId = await ctx.runMutation(
+              internal.memories.addInternal,
+              {
+                userId: args.userId,
+                content,
+                embedding,
+                type: entry.memory.type,
+                keywords: entry.memory.keywords,
+                contentHash,
+                sourceConversationId: args.conversationId,
+              }
+            );
+
+            await ctx.runMutation(internal.memories.logAudit, {
               userId: args.userId,
-              content,
-              embedding,
-              type: entry.memory.type,
-              keywords: entry.memory.keywords,
-              sourceConversationId: args.conversationId,
+              conversationId: args.conversationId,
+              action: "ADD",
+              reason: decision.reason,
+              memoryId,
+              memoryContent: content,
             });
             break;
           }
 
           case "UPDATE": {
             if (decision.target_memory_id && decision.content) {
+              // Hash dedup check on merged content
+              const contentHash = await computeContentHash(decision.content);
+              const existing = await ctx.runQuery(
+                internal.memories.checkContentHash,
+                { userId: args.userId, contentHash }
+              );
+              if (existing) {
+                await ctx.runMutation(internal.memories.logAudit, {
+                  userId: args.userId,
+                  conversationId: args.conversationId,
+                  action: "HASH_DUPLICATE",
+                  reason: `Update content hash matches existing memory ${existing._id}`,
+                  memoryContent: decision.content,
+                  targetMemoryId: existing._id,
+                });
+                break;
+              }
+
               // Invalidate the old memory (temporal validity model)
               await ctx.runMutation(internal.memories.invalidateInternal, {
                 memoryId: decision.target_memory_id as any,
               });
               // Add the updated/merged version
               const embedding = await generateEmbedding(decision.content);
-              await ctx.runMutation(internal.memories.addInternal, {
+              const memoryId = await ctx.runMutation(
+                internal.memories.addInternal,
+                {
+                  userId: args.userId,
+                  content: decision.content,
+                  embedding,
+                  type: entry.memory.type,
+                  keywords: entry.memory.keywords,
+                  contentHash,
+                  sourceConversationId: args.conversationId,
+                }
+              );
+
+              await ctx.runMutation(internal.memories.logAudit, {
                 userId: args.userId,
-                content: decision.content,
-                embedding,
-                type: entry.memory.type,
-                keywords: entry.memory.keywords,
-                sourceConversationId: args.conversationId,
+                conversationId: args.conversationId,
+                action: "UPDATE",
+                reason: decision.reason,
+                memoryId,
+                targetMemoryId: decision.target_memory_id as any,
+                memoryContent: decision.content,
               });
             }
             break;
@@ -499,12 +581,28 @@ export const extractAndStoreMemories = internalAction({
               await ctx.runMutation(internal.memories.invalidateInternal, {
                 memoryId: decision.target_memory_id as any,
               });
+
+              await ctx.runMutation(internal.memories.logAudit, {
+                userId: args.userId,
+                conversationId: args.conversationId,
+                action: "INVALIDATE",
+                reason: decision.reason,
+                targetMemoryId: decision.target_memory_id as any,
+              });
             }
             break;
           }
 
-          case "NOOP":
+          case "NOOP": {
+            await ctx.runMutation(internal.memories.logAudit, {
+              userId: args.userId,
+              conversationId: args.conversationId,
+              action: "NOOP",
+              reason: decision.reason,
+              memoryContent: entry.memory.content,
+            });
             break;
+          }
         }
       } catch (error) {
         console.error(
@@ -533,6 +631,7 @@ export const add = mutation({
       v.literal("procedural")
     ),
     keywords: v.optional(v.array(v.string())),
+    contentHash: v.optional(v.string()),
     sourceConversationId: v.optional(v.id("conversations")),
   },
   handler: async (ctx, args) => {
@@ -542,6 +641,7 @@ export const add = mutation({
       embedding: args.embedding,
       type: args.type,
       keywords: args.keywords,
+      contentHash: args.contentHash,
       sourceConversationId: args.sourceConversationId,
       validAt: Date.now(),
       createdAt: Date.now(),
@@ -569,18 +669,20 @@ export const search = action({
   handler: async (ctx, args): Promise<Array<Record<string, unknown>>> => {
     const limit = args.limit ?? 10;
 
+    // Over-fetch to compensate for post-filtering invalidated results
     const results = await ctx.vectorSearch("memories", "by_embedding", {
       vector: args.embedding,
-      limit,
+      limit: limit * 2,
       filter: (q) => q.eq("userId", args.userId),
     });
 
-    // Filter out invalidated memories
+    // Post-filter invalidated memories (Convex vector filters don't support AND)
     const validMemories: Array<Record<string, unknown>> = [];
     for (const result of results) {
-      const memory: Record<string, unknown> | null = await ctx.runQuery(internal.memories.getById, {
-        memoryId: result._id,
-      });
+      const memory: Record<string, unknown> | null = await ctx.runQuery(
+        internal.memories.getById,
+        { memoryId: result._id }
+      );
       if (memory && !memory.invalidAt) {
         validMemories.push({ ...memory, score: result._score });
       }
@@ -590,10 +692,81 @@ export const search = action({
   },
 });
 
+// Hot-path: save a memory immediately from a chat tool call
+export const addFromTool = action({
+  args: {
+    userId: v.id("users"),
+    content: v.string(),
+    type: v.union(
+      v.literal("episodic"),
+      v.literal("semantic"),
+      v.literal("procedural")
+    ),
+    keywords: v.optional(v.array(v.string())),
+  },
+  handler: async (
+    ctx,
+    args
+  ): Promise<
+    | { success: true; memoryId: string }
+    | { success: false; reason: string; existingMemoryId?: string }
+  > => {
+    // Hash dedup check (best-effort — not atomic with insert)
+    const contentHash = await computeContentHash(args.content);
+    const existing = await ctx.runQuery(internal.memories.checkContentHash, {
+      userId: args.userId,
+      contentHash,
+    });
+    if (existing) {
+      return {
+        success: false,
+        reason: "duplicate",
+        existingMemoryId: existing._id,
+      };
+    }
+
+    // Generate embedding and insert
+    let embedding: number[];
+    try {
+      embedding = await generateEmbedding(args.content);
+    } catch (error) {
+      console.error("addFromTool: embedding generation failed:", error);
+      return { success: false, reason: "embedding_failed" };
+    }
+
+    const memoryId = await ctx.runMutation(internal.memories.addInternal, {
+      userId: args.userId,
+      content: args.content,
+      embedding,
+      type: args.type,
+      keywords: args.keywords,
+      contentHash,
+    });
+
+    return { success: true, memoryId };
+  },
+});
+
 export const getById = internalQuery({
   args: { memoryId: v.id("memories") },
   handler: async (ctx, args) => {
     return await ctx.db.get(args.memoryId);
+  },
+});
+
+export const checkContentHash = internalQuery({
+  args: {
+    userId: v.id("users"),
+    contentHash: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("memories")
+      .withIndex("by_content_hash", (q) =>
+        q.eq("userId", args.userId).eq("contentHash", args.contentHash)
+      )
+      .filter((q) => q.eq(q.field("invalidAt"), undefined))
+      .first();
   },
 });
 
@@ -625,6 +798,7 @@ export const addInternal = internalMutation({
       v.literal("procedural")
     ),
     keywords: v.optional(v.array(v.string())),
+    contentHash: v.optional(v.string()),
     sourceConversationId: v.optional(v.id("conversations")),
   },
   handler: async (ctx, args) => {
@@ -634,6 +808,7 @@ export const addInternal = internalMutation({
       embedding: args.embedding,
       type: args.type,
       keywords: args.keywords,
+      contentHash: args.contentHash,
       sourceConversationId: args.sourceConversationId,
       validAt: Date.now(),
       createdAt: Date.now(),
@@ -683,6 +858,43 @@ export const updateCoreMemoryInternal = internalMutation({
         content: args.content,
         updatedAt: Date.now(),
       });
+    } else {
+      await ctx.db.insert("coreMemoryBlocks", {
+        userId: args.userId,
+        label: args.label,
+        content: args.content,
+        updatedAt: Date.now(),
+      });
     }
+  },
+});
+
+export const logAudit = internalMutation({
+  args: {
+    userId: v.id("users"),
+    conversationId: v.id("conversations"),
+    action: v.union(
+      v.literal("ADD"),
+      v.literal("UPDATE"),
+      v.literal("INVALIDATE"),
+      v.literal("NOOP"),
+      v.literal("HASH_DUPLICATE")
+    ),
+    reason: v.string(),
+    memoryId: v.optional(v.id("memories")),
+    targetMemoryId: v.optional(v.id("memories")),
+    memoryContent: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.insert("memoryAudit", {
+      userId: args.userId,
+      conversationId: args.conversationId,
+      action: args.action,
+      reason: args.reason,
+      memoryId: args.memoryId,
+      targetMemoryId: args.targetMemoryId,
+      memoryContent: args.memoryContent,
+      createdAt: Date.now(),
+    });
   },
 });
