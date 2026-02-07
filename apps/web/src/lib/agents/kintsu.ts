@@ -1,15 +1,11 @@
-import { tool } from "ai";
+import { tool, embed } from "ai";
 import { z } from "zod";
 import type { UIMessage } from "ai";
-import OpenAI from "openai";
+import { openai } from "@ai-sdk/openai";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "@kintsu/backend/convex/_generated/api";
 
 // Initialize clients
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || "",
-});
-
 const convexUrl = process.env.VITE_CONVEX_URL || process.env.CONVEX_URL || "";
 const convex = new ConvexHttpClient(convexUrl);
 
@@ -50,6 +46,7 @@ You understand attachment theory deeply - the anxious, avoidant, and secure atta
 - Help them understand their triggers and responses with compassion
 - Use the queryKnowledge tool when you need specific attachment theory concepts or examples
 - Use the recallMemory tool when you need to remember past conversations or user details
+- Use the saveMemory tool when the user says "remember this," makes a correction, or shares something you should not forget
 
 **Response style:**
 - Sometimes gentle and validating: "That sounds really hard..."
@@ -68,12 +65,14 @@ Remember: The goal is not to "fix" them but to help them understand themselves a
  * Generate embedding for a query text
  */
 async function getEmbedding(text: string): Promise<number[]> {
-  const response = await openai.embeddings.create({
-    model: "text-embedding-3-small",
-    input: text,
-    dimensions: 1536,
+  const { embedding } = await embed({
+    model: openai.embedding("text-embedding-3-small"),
+    value: text,
+    providerOptions: {
+      openai: { dimensions: 1536 },
+    },
   });
-  return response.data[0].embedding;
+  return embedding;
 }
 
 // Tool definitions
@@ -140,6 +139,74 @@ export const kintsuTools = {
           found: false,
           query,
           error: "Failed to search knowledge base",
+        };
+      }
+    },
+  }),
+
+  saveMemory: tool({
+    description:
+      "Save important information immediately — corrections, explicit 'remember this' requests, critical updates about the user or their relationship",
+    inputSchema: z.object({
+      content: z
+        .string()
+        .describe("The fact or information to remember, written as a clear standalone statement"),
+      type: z
+        .enum(["episodic", "semantic", "procedural"])
+        .describe("Memory type: episodic (specific event), semantic (general fact), procedural (strategy/technique)"),
+      keywords: z
+        .array(z.string())
+        .optional()
+        .describe("Keywords for this memory"),
+      userId: z
+        .string()
+        .optional()
+        .describe("The user ID to save the memory for"),
+    }),
+    execute: async ({
+      content,
+      type,
+      keywords,
+      userId,
+    }: {
+      content: string;
+      type: "episodic" | "semantic" | "procedural";
+      keywords?: string[];
+      userId?: string;
+    }) => {
+      try {
+        if (!userId) {
+          return {
+            saved: false,
+            message: "No user context available. Memory saving requires an active user session.",
+          };
+        }
+
+        const result = await convex.action(api.memories.addFromTool, {
+          userId: userId as any,
+          content,
+          type,
+          keywords,
+        });
+
+        if (result.success) {
+          return {
+            saved: true,
+            memoryId: result.memoryId,
+            message: `Saved: "${content}"`,
+          };
+        } else {
+          return {
+            saved: false,
+            reason: result.reason,
+            message: "This information is already saved.",
+          };
+        }
+      } catch (error) {
+        console.error("Save memory error:", error);
+        return {
+          saved: false,
+          error: "Failed to save memory",
         };
       }
     },

@@ -48,6 +48,7 @@ export default defineSchema({
       v.literal("procedural")
     ),
     keywords: v.optional(v.array(v.string())),
+    contentHash: v.optional(v.string()),
     validAt: v.optional(v.number()),
     invalidAt: v.optional(v.number()),
     sourceConversationId: v.optional(v.id("conversations")),
@@ -55,10 +56,11 @@ export default defineSchema({
   })
     .index("by_user", ["userId"])
     .index("by_user_valid", ["userId", "invalidAt"])
+    .index("by_content_hash", ["userId", "contentHash"])
     .vectorIndex("by_embedding", {
       vectorField: "embedding",
       dimensions: 1536,
-      filterFields: ["userId"],
+      filterFields: ["userId", "invalidAt"],
     }),
 
   // Memory Links (A-MEM style connections)
@@ -133,4 +135,24 @@ export default defineSchema({
   })
     .index("by_from", ["fromConceptId"])
     .index("by_to", ["toConceptId"]),
+
+  // Memory Audit Log (decision trail for debugging)
+  memoryAudit: defineTable({
+    userId: v.id("users"),
+    conversationId: v.id("conversations"),
+    action: v.union(
+      v.literal("ADD"),
+      v.literal("UPDATE"),
+      v.literal("INVALIDATE"),
+      v.literal("NOOP"),
+      v.literal("HASH_DUPLICATE")
+    ),
+    reason: v.string(),
+    memoryId: v.optional(v.id("memories")),
+    targetMemoryId: v.optional(v.id("memories")),
+    memoryContent: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_conversation", ["conversationId"]),
 });
